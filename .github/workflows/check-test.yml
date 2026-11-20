@@ -5,23 +5,76 @@ on:
       script:
         description: The check file, base64
         required: true
+      url:
+        description: Installer to test (default is the published one)
+        default: ''
+      keyed:
+        description: Give the copy starting settings with test keys, like a family copy (on/off)
+        default: 'off'
+      mic:
+        description: Give the machine a microphone and speakers (on/off)
+        default: 'off'
+      loose:
+        description: Run an unzipped copy from folders with spaces in their names (on/off)
+        default: 'off'
 jobs:
   test:
     runs-on: windows-2025
-    timeout-minutes: 20
+    timeout-minutes: 25
     steps:
-      - name: Install the published Jarvis
+      - name: Give the machine a microphone and speakers
+        if: inputs.mic == 'on'
+        continue-on-error: true
+        uses: LABSN/sound-ci-helpers@v1
+      - name: Sound devices
+        if: always()
+        shell: powershell
+        run: |
+          Get-Service Audiosrv, AudioEndpointBuilder -ErrorAction SilentlyContinue | Format-Table Name, Status
+          Get-CimInstance Win32_SoundDevice | Format-Table Name, Status
+          Get-PnpDevice -Class AudioEndpoint -ErrorAction SilentlyContinue | Format-Table FriendlyName, Status
+      - name: Install Jarvis
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
           $ProgressPreference = 'SilentlyContinue'
-          $info = Invoke-RestMethod 'https://github.com/GelizonUX/jarvis-updates/releases/latest/download/latest.json'
-          "installing $($info.version)"
-          Invoke-WebRequest $info.url -OutFile "$env:RUNNER_TEMP\setup.exe"
+          $url = '${{ inputs.url }}'
+          if (-not $url) { $info = Invoke-RestMethod 'https://github.com/GelizonUX/jarvis-updates/releases/latest/download/latest.json'; $url = $info.url; "published version $($info.version)" }
+          Invoke-WebRequest $url -OutFile "$env:RUNNER_TEMP\setup.exe"
           $p = Start-Process "$env:RUNNER_TEMP\setup.exe" -ArgumentList '/S' -PassThru
           if (-not $p.WaitForExit(300000)) { throw 'the installer did not finish in 5 minutes' }
           "installer exit code $($p.ExitCode)"
           "installed: $(Test-Path "$env:LOCALAPPDATA\Programs\jarvis\Jarvis.exe")"
+      - name: Make it a keyed copy
+        if: inputs.keyed == 'on'
+        shell: powershell
+        run: |
+          $k = [Text.Encoding]::UTF8.GetBytes('jarvis-family-copy')
+          function Scramble($t) { $b = [Text.Encoding]::UTF8.GetBytes($t); for ($i = 0; $i -lt $b.Length; $i++) { $b[$i] = [byte]($b[$i] -bxor $k[$i % $k.Length]) }; [Convert]::ToBase64String($b) }
+          $preset = @{
+            config = @{ addressAs = "ma'am"; effort = 'medium'; userName = 'Tester' }
+            keys = @{ anthropic = (Scramble 'sk-ant-test-0000000000000000000000000000000000'); deepgram = (Scramble 'test000000000000000000000000000000000000'); elevenlabs = (Scramble 'sk_test0000000000000000000000000000000000') }
+            welcome = @{ id = 'test-1'; text = 'Welcome! I am glad to finally meet you. How may I help you?'; name = 'Tester'; from = 'The maker' }
+          }
+          $dir = "$env:LOCALAPPDATA\Programs\jarvis\resources\app.asar.unpacked"
+          [IO.File]::WriteAllText("$dir\preset.json", ($preset | ConvertTo-Json -Depth 5 -Compress))
+          "starting settings written: $((Get-Item "$dir\preset.json").Length) bytes"
+      - name: An unzipped copy in folders with spaces
+        if: inputs.loose == 'on'
+        shell: powershell
+        run: |
+          $dest = 'C:\Users\runneradmin\Downloads\My Jarvis Folder\Jarvis-win32-x64'
+          New-Item -ItemType Directory -Force (Split-Path $dest) | Out-Null
+          Copy-Item "$env:LOCALAPPDATA\Programs\jarvis" $dest -Recurse
+          $data = 'C:\Users\runneradmin\AppData\Roaming\Jarvis Data Folder'
+          $tmp = 'C:\Users\runneradmin\AppData\Local\Temp Folder'
+          New-Item -ItemType Directory -Force $tmp | Out-Null
+          "JARVIS_CHECK_EXE=$dest\Jarvis.exe" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "JARVIS_CHECK_DATA=$data" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "JARVIS_CHECK_ARGS=--user-data-dir=`"$data`"" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "TEMP=$tmp" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "TMP=$tmp" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "copy made: $(Test-Path "$dest\Jarvis.exe")"
       - name: Run the check file the way a person would
         shell: powershell
         env:
