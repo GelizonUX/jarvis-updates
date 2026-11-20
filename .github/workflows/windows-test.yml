@@ -7,6 +7,9 @@ on:
       mode:
         description: "How to run the installer: ui (as a person does) or silent (as an update does)"
         default: ui
+      url:
+        description: "An installer to test instead of the published one (optional)"
+        default: ""
 permissions:
   contents: read
 jobs:
@@ -29,7 +32,9 @@ jobs:
           Invoke-WebRequest "https://github.com/${{ github.repository }}/releases/latest/download/latest.json" -OutFile out\latest.json
           $info = Get-Content out\latest.json -Raw | ConvertFrom-Json
           "version $($info.version), $($info.size) bytes"
-          Invoke-WebRequest $info.url -OutFile Jarvis-Setup.exe
+          $url = '${{ inputs.url }}'; if (-not $url) { $url = $info.url }
+          "installer: $url"
+          Invoke-WebRequest $url -OutFile Jarvis-Setup.exe
           "downloaded $((Get-Item Jarvis-Setup.exe).Length) bytes"
 
       - name: Run the installer and watch it
@@ -79,27 +84,8 @@ jobs:
           else { "INSTALLER STILL RUNNING after 480s: STALLED"; Shot 'install-stalled'; Tree $p.Id; Stop-Process -Id $p.Id -Force }
           "installed: $(Size $dest); Jarvis.exe there: $(Test-Path (Join-Path $dest 'Jarvis.exe'))"
           Get-ChildItem $dest -ErrorAction SilentlyContinue | Select-Object Name, Length | Format-Table -AutoSize
+          "-- real-time scanning while installing: $((Get-MpComputerStatus -ErrorAction SilentlyContinue).RealTimeProtectionEnabled)"
           "shortcuts: desktop $(Test-Path (Join-Path ([Environment]::GetFolderPath('Desktop')) 'Jarvis.lnk')), start menu $(Test-Path (Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Jarvis.lnk'))"
-
-      - name: What Windows' own virus scanner makes of his files
-        if: always()
-        shell: powershell
-        run: |
-          $ErrorActionPreference = 'Continue'
-          try { Update-MpSignature -ErrorAction Stop; "signatures updated" } catch { "signatures not updated: $($_.Exception.Message)" }
-          try { Get-MpComputerStatus | Select-Object AMServiceEnabled, RealTimeProtectionEnabled, AntivirusSignatureVersion, AntivirusSignatureLastUpdated | Format-List } catch { "no scanner status: $($_.Exception.Message)" }
-          $mp = Join-Path $env:ProgramFiles 'Windows Defender\MpCmdRun.exe'
-          $dest = Join-Path $env:LOCALAPPDATA 'Programs\Jarvis'
-          $files = @((Join-Path $PWD 'Jarvis-Setup.exe'), (Join-Path $dest 'resources\app.asar'), (Join-Path $dest 'Jarvis.exe'), (Join-Path $dest 'resources\app.asar.unpacked\bin\win\adb.exe'), (Join-Path $dest 'resources\elevate.exe'))
-          foreach ($f in $files) {
-            if (-not (Test-Path $f)) { "MISSING: $f"; continue }
-            $sw = [Diagnostics.Stopwatch]::StartNew()
-            $out = & $mp -Scan -ScanType 3 -File $f -DisableRemediation 2>&1
-            "$(Split-Path $f -Leaf) ($([int]((Get-Item $f).Length / 1MB)) MB): exit code $LASTEXITCODE (0 = clean, 2 = threat) in $([int]$sw.Elapsed.TotalSeconds)s"
-            $out | ForEach-Object { "    $_" }
-          }
-          "-- what the scanner recorded on this machine"
-          try { $d = @(Get-MpThreatDetection); "detections: $($d.Count)"; $d | Select-Object InitialDetectionTime, ThreatID, Resources, ActionSuccess | Format-List; Get-MpThreat | Select-Object ThreatName, SeverityID, Resources | Format-List } catch { "not readable: $($_.Exception.Message)" }
 
       - name: Jarvis as he opens for a person
         if: always()
@@ -223,6 +209,27 @@ jobs:
           })();
           '@ | Set-Content helper-test.js -Encoding UTF8
           node helper-test.js
+
+      - name: What Windows' own virus scanner makes of his files
+        if: always()
+        timeout-minutes: 14
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Continue'
+          try { Get-MpComputerStatus | Select-Object AMServiceEnabled, RealTimeProtectionEnabled, AntivirusSignatureVersion, AntivirusSignatureLastUpdated | Format-List } catch { "no scanner status: $($_.Exception.Message)" }
+          $mp = Join-Path $env:ProgramFiles 'Windows Defender\MpCmdRun.exe'
+          $dest = Join-Path $env:LOCALAPPDATA 'Programs\Jarvis'
+          $files = @((Join-Path $dest 'resources\app.asar'), (Join-Path $dest 'resources\app.asar.unpacked\bin\win\adb.exe'), (Join-Path $dest 'resources\elevate.exe'), (Join-Path $dest 'Jarvis.exe'), (Join-Path $PWD 'Jarvis-Setup.exe'))
+          foreach ($f in $files) {
+            if (-not (Test-Path $f)) { "MISSING: $f"; continue }
+            "scanning $(Split-Path $f -Leaf) ($([int]((Get-Item $f).Length / 1MB)) MB) ..."
+            $sw = [Diagnostics.Stopwatch]::StartNew()
+            $out = & $mp -Scan -ScanType 3 -File $f -DisableRemediation 2>&1
+            "  -> exit code $LASTEXITCODE (0 = clean, 2 = threat) in $([int]$sw.Elapsed.TotalSeconds)s"
+            $out | ForEach-Object { "    $_" }
+          }
+          "-- what the scanner recorded on this machine"
+          try { $d = @(Get-MpThreatDetection); "detections: $($d.Count)"; $d | Select-Object InitialDetectionTime, ThreatID, Resources, ActionSuccess | Format-List; Get-MpThreat | Select-Object ThreatName, SeverityID, Resources | Format-List } catch { "not readable: $($_.Exception.Message)" }
 
       - name: Keep the pictures and logs
         if: always()
