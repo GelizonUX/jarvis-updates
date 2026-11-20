@@ -7,6 +7,9 @@ on:
       mode:
         description: "How to run the installer: ui (as a person does) or silent (as an update does)"
         default: ui
+      realtime:
+        description: "on = switch the virus scanner's live checking on first, as on a home PC"
+        default: "off"
       url:
         description: "An installer to test instead of the published one (optional)"
         default: ""
@@ -24,6 +27,10 @@ jobs:
           "PowerShell $($PSVersionTable.PSVersion)"
           "Session: $([System.Diagnostics.Process]::GetCurrentProcess().SessionId), interactive: $([Environment]::UserInteractive)"
           New-Item -ItemType Directory -Force out | Out-Null
+          if ('${{ inputs.realtime }}' -eq 'on') {
+            try { Set-MpPreference -DisableRealtimeMonitoring $false -ErrorAction Stop; Start-Sleep -Seconds 10 } catch { "couldn't switch live checking on: $($_.Exception.Message)" }
+          }
+          "virus scanner live checking: $((Get-MpComputerStatus -ErrorAction SilentlyContinue).RealTimeProtectionEnabled)"
 
       - name: Download the published update
         shell: powershell
