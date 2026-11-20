@@ -129,6 +129,18 @@ jobs:
           Shot 'setup-again-2-after-yes'
           "the Setup file closed: $($p.HasExited); Jarvis running: $(@(Get-Process Jarvis -ErrorAction SilentlyContinue).Count) processes"
           "his program folder was left alone: $((Get-Item "$env:LOCALAPPDATA\Programs\jarvis\resources").CreationTime -eq $made)"
+      - name: Clicking his icon four times at once
+        if: inputs.again == 'on'
+        shell: powershell
+        run: |
+          Get-Process Jarvis -ErrorAction SilentlyContinue | Stop-Process -Force
+          Start-Sleep 3
+          $exe = "$env:LOCALAPPDATA\Programs\jarvis\Jarvis.exe"
+          1..4 | ForEach-Object { Start-Process $exe; Start-Sleep -Milliseconds 400 }
+          Start-Sleep 15
+          $mains = @(Get-CimInstance Win32_Process -Filter "Name='Jarvis.exe'" | Where-Object { $_.CommandLine -notmatch '--type=' })
+          "main Jarvis programs after four quick clicks: $($mains.Count) (should be 1)"
+          Get-Content "$env:APPDATA\Jarvis\logs\jarvis.log" -Tail 8 | ForEach-Object { if ($_.Length -gt 200) { $_.Substring(0, 200) } else { $_ } }
       - uses: actions/upload-artifact@v4
         if: always()
         with:
