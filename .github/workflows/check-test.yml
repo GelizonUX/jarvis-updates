@@ -136,8 +136,14 @@ jobs:
           Get-Process Jarvis -ErrorAction SilentlyContinue | Stop-Process -Force
           Start-Sleep 3
           $exe = "$env:LOCALAPPDATA\Programs\jarvis\Jarvis.exe"
+          $run = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+          "his start-up entries before: $(((Get-ItemProperty $run).PSObject.Properties | Where-Object { $_.Value -match 'Jarvis' } | ForEach-Object { $_.Name }) -join ', ')"
+          New-ItemProperty -Path $run -Name 'local.jarvis.companion' -Value "`"$exe`"" -Force | Out-Null
+          "added the second entry that 1.35.1 used to write"
           1..4 | ForEach-Object { Start-Process $exe; Start-Sleep -Milliseconds 400 }
-          Start-Sleep 15
+          Start-Sleep 45
+          "his start-up entries after: $(((Get-ItemProperty $run).PSObject.Properties | Where-Object { $_.Value -match 'Jarvis' } | ForEach-Object { $_.Name }) -join ', ') (should be electron.app.Jarvis only)"
+          "guard warnings about start-up items in his notes: $(@(Select-String -Path "$env:APPDATA\Jarvis\logs\jarvis.log" -Pattern 'guard: (warn|critical) startup:').Count) (should be 0)"
           $mains = @(Get-CimInstance Win32_Process -Filter "Name='Jarvis.exe'" | Where-Object { $_.CommandLine -notmatch '--type=' })
           "main Jarvis programs after four quick clicks: $($mains.Count) (should be 1)"
           Get-Content "$env:APPDATA\Jarvis\logs\jarvis.log" -Tail 8 | ForEach-Object { if ($_.Length -gt 200) { $_.Substring(0, 200) } else { $_ } }
