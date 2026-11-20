@@ -47,6 +47,7 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $ProgressPreference = 'SilentlyContinue'
+          "before Jarvis is installed, Windows lists the running programs in $([math]::Round((Measure-Command { tasklist /fo csv /nh | Out-Null }).TotalSeconds, 1)) s"
           $url = '${{ inputs.url }}'
           if (-not $url) { $info = Invoke-RestMethod 'https://github.com/GelizonUX/jarvis-updates/releases/latest/download/latest.json'; $url = $info.url; "published version $($info.version)" }
           Invoke-WebRequest $url -OutFile "$env:RUNNER_TEMP\setup.exe"
@@ -166,10 +167,16 @@ jobs:
           $old = (Get-Process Jarvis | Sort-Object StartTime | Select-Object -First 1).StartTime
           $made = (Get-Item "$env:LOCALAPPDATA\Programs\jarvis\resources").CreationTime
           $p = Start-Process "$env:RUNNER_TEMP\setup.exe" -ArgumentList '--updated', '--force-run' -PassThru
-          Start-Sleep 4
-          Shot 'update-1-in-progress'
-          $wins = @(Get-Process | Where-Object { $_.MainWindowTitle -match 'Jarvis' } | ForEach-Object { "$($_.ProcessName): $($_.MainWindowTitle)" })
-          "at 4 seconds the installer is running: $(-not $p.HasExited); windows on screen: $($wins -join ' | ')"
+          # in a real update he closes himself the moment the installer has started
+          Get-Process Jarvis -ErrorAction SilentlyContinue | Stop-Process -Force
+          foreach ($t in 3, 7, 11, 16, 22, 30) {
+            $wait = $t - ((Get-Date) - $p.StartTime).TotalSeconds
+            if ($wait -gt 0) { Start-Sleep -Milliseconds ([int]($wait * 1000)) }
+            if ($p.HasExited) { "at $t seconds the installer had already finished"; break }
+            Shot "update-1-at-${t}s"
+            $wins = @(Get-Process | Where-Object { $_.MainWindowTitle } | Where-Object { $_.Id -eq $p.Id -or $_.MainWindowTitle -match 'Jarvis|Setup|Install' } | ForEach-Object { "$($_.ProcessName): $($_.MainWindowTitle)" })
+            "at $t seconds: windows on screen: $($wins -join ' | ')"
+          }
           $null = $p.WaitForExit(240000)
           "the installer finished: $($p.HasExited), exit code $($p.ExitCode)"
           Start-Sleep 25
@@ -188,6 +195,7 @@ jobs:
             Select-String -Path $log -Pattern 'selfcheck|wake:|Hey Jarvis|microphone:|Microphone|update:|watcher failed|START-UP|page error|window:' | ForEach-Object { $l = $_.Line; if ($l.Length -gt 230) { $l.Substring(0, 230) } else { $l } } | Select-Object -Last 40
             Copy-Item $log out\jarvis-log-end.txt -ErrorAction SilentlyContinue
           } else { "no notes file" }
+          "Windows lists the running programs in $([math]::Round((Measure-Command { tasklist /fo csv /nh | Out-Null }).TotalSeconds, 1)) s with Jarvis $(if (Get-Process Jarvis -ErrorAction SilentlyContinue) { 'running' } else { 'closed' }) (tasklist), and in $([math]::Round((Measure-Command { powershell -NoProfile -NonInteractive -Command 'Get-Process | Select-Object Id,ProcessName,Path | ConvertTo-Json -Compress' | Out-Null }).TotalSeconds, 1)) s by PowerShell"
           "files for ARM processors in his folder: $(@(Get-ChildItem "$env:LOCALAPPDATA\Programs\jarvis\resources" -Recurse -Directory -Filter arm64 -ErrorAction SilentlyContinue).Count) (should be 0)"
           "size of his program folder: $([math]::Round(((Get-ChildItem "$env:LOCALAPPDATA\Programs\jarvis" -Recurse -File | Measure-Object Length -Sum).Sum / 1MB))) MB"
       - name: Removing him
