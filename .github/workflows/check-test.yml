@@ -209,6 +209,10 @@ jobs:
           Start-Process "$env:LOCALAPPDATA\Programs\jarvis\Uninstall Jarvis.exe" -ArgumentList '/S' -Wait
           Start-Sleep 30
           "his program is gone: $(-not (Test-Path "$env:LOCALAPPDATA\Programs\jarvis\Jarvis.exe"))"
+          if (Test-Path "$env:LOCALAPPDATA\Programs\jarvis") {
+            "what was left in his folder: $((Get-ChildItem "$env:LOCALAPPDATA\Programs\jarvis" -Recurse -File -ErrorAction SilentlyContinue | Select-Object -First 12 | ForEach-Object { $_.FullName.Replace("$env:LOCALAPPDATA\Programs\jarvis\", '') }) -join ', ')"
+            "programs still running from his folder: $((Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -like "$env:LOCALAPPDATA\Programs\jarvis\*" } | ForEach-Object { $_.Name }) -join ', ')"
+          }
           "his start-up entries after: '$(((Get-ItemProperty $run).PSObject.Properties | Where-Object { $_.Value -match 'Jarvis' } | ForEach-Object { $_.Name }) -join ', ')' (should be empty)"
           "his memories and settings were kept: $(Test-Path "$env:APPDATA\Jarvis\config.json")"
           "Jarvis processes left: $(@(Get-Process Jarvis -ErrorAction SilentlyContinue).Count)"
