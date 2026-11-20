@@ -10,6 +10,9 @@ on:
       realtime:
         description: "on = switch the virus scanner's live checking on first, as on a home PC"
         default: "off"
+      lab:
+        description: "on = only install, then time the virus scanner on each part of the program"
+        default: "off"
       url:
         description: "An installer to test instead of the published one (optional)"
         default: ""
@@ -18,7 +21,7 @@ permissions:
 jobs:
   test:
     runs-on: windows-latest
-    timeout-minutes: 30
+    timeout-minutes: 50
     steps:
       - name: The machine
         shell: powershell
@@ -28,7 +31,17 @@ jobs:
           "Session: $([System.Diagnostics.Process]::GetCurrentProcess().SessionId), interactive: $([Environment]::UserInteractive)"
           New-Item -ItemType Directory -Force out | Out-Null
           if ('${{ inputs.realtime }}' -eq 'on') {
-            try { Set-MpPreference -DisableRealtimeMonitoring $false -ErrorAction Stop; Start-Sleep -Seconds 10 } catch { "couldn't switch live checking on: $($_.Exception.Message)" }
+            try {
+              $pref = Get-MpPreference
+              "exclusions this machine came with: paths [$(@($pref.ExclusionPath) -join '; ')] processes [$(@($pref.ExclusionProcess) -join '; ')] extensions [$(@($pref.ExclusionExtension) -join '; ')]"
+              foreach ($x in @($pref.ExclusionPath)) { if ($x) { Remove-MpPreference -ExclusionPath $x } }
+              foreach ($x in @($pref.ExclusionProcess)) { if ($x) { Remove-MpPreference -ExclusionProcess $x } }
+              foreach ($x in @($pref.ExclusionExtension)) { if ($x) { Remove-MpPreference -ExclusionExtension $x } }
+              Set-MpPreference -DisableRealtimeMonitoring $false -DisableBehaviorMonitoring $false -DisableIOAVProtection $false -DisableScriptScanning $false -ErrorAction Stop
+              Start-Sleep -Seconds 10
+              $pref = Get-MpPreference
+              "exclusions left: [$(@($pref.ExclusionPath) -join '; ')]"
+            } catch { "couldn't switch live checking on: $($_.Exception.Message)" }
           }
           "virus scanner live checking: $((Get-MpComputerStatus -ErrorAction SilentlyContinue).RealTimeProtectionEnabled)"
 
@@ -95,7 +108,7 @@ jobs:
           "shortcuts: desktop $(Test-Path (Join-Path ([Environment]::GetFolderPath('Desktop')) 'Jarvis.lnk')), start menu $(Test-Path (Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Jarvis.lnk'))"
 
       - name: Jarvis as he opens for a person
-        if: always()
+        if: always() && inputs.lab != 'on'
         shell: powershell
         run: |
           $ErrorActionPreference = 'Continue'
@@ -126,7 +139,7 @@ jobs:
           Start-Sleep -Seconds 3
 
       - name: His window, photographed (test mode)
-        if: always()
+        if: always() && inputs.lab != 'on'
         shell: powershell
         run: |
           $ErrorActionPreference = 'Continue'
@@ -161,7 +174,7 @@ jobs:
           Remove-Item Env:JARVIS_TEST, Env:JARVIS_NO_SETUP, Env:JARVIS_TEST_VISIBLE, Env:JARVIS_USERDATA, Env:JARVIS_SCREENSHOT, Env:JARVIS_SHOT_DELAY, Env:JARVIS_TEST_PROJECTS, Env:JARVIS_TEST_INVOICE -ErrorAction SilentlyContinue
 
       - name: The Windows parts he relies on
-        if: always()
+        if: always() && inputs.lab != 'on'
         shell: powershell
         run: |
           $ErrorActionPreference = 'Continue'
@@ -186,7 +199,7 @@ jobs:
           "exit code $LASTEXITCODE; sound file: $(if (Test-Path out\voice.wav) { (Get-Item out\voice.wav).Length } else { 'none' }) bytes"
 
       - name: Mouse and keyboard helper
-        if: always()
+        if: always() && inputs.lab != 'on'
         shell: powershell
         run: |
           $ErrorActionPreference = 'Continue'
@@ -218,7 +231,7 @@ jobs:
           node helper-test.js
 
       - name: What Windows' own virus scanner makes of his files
-        if: always()
+        if: always() && inputs.lab != 'on'
         timeout-minutes: 14
         shell: powershell
         run: |
@@ -237,6 +250,57 @@ jobs:
           }
           "-- what the scanner recorded on this machine"
           try { $d = @(Get-MpThreatDetection); "detections: $($d.Count)"; $d | Select-Object InitialDetectionTime, ThreatID, Resources, ActionSuccess | Format-List; Get-MpThreat | Select-Object ThreatName, SeverityID, Resources | Format-List } catch { "not readable: $($_.Exception.Message)" }
+
+      - name: Which part of the program the virus scanner is slow on
+        if: always() && inputs.lab == 'on'
+        timeout-minutes: 30
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $mp = Join-Path $env:ProgramFiles 'Windows Defender\MpCmdRun.exe'
+          $asar = Join-Path $env:LOCALAPPDATA 'Programs\Jarvis\resources\app.asar'
+          Get-Process Jarvis -ErrorAction SilentlyContinue | Stop-Process -Force
+          if (-not (Test-Path $asar)) { "not installed"; exit 0 }
+          New-Item -ItemType Directory -Force lab | Out-Null
+          npx --yes @electron/asar extract $asar lab\app
+          function Scan($path, $label) {
+            $dir = Test-Path $path -PathType Container
+            if ($dir) { $m = Get-ChildItem $path -Recurse -File -Force | Measure-Object Length -Sum; $n = $m.Count; $mb = $m.Sum / 1MB } else { $n = 1; $mb = (Get-Item $path).Length / 1MB }
+            $sw = [Diagnostics.Stopwatch]::StartNew()
+            $null = & $mp -Scan -ScanType 3 -File $path -DisableRemediation 2>&1
+            ('{0,6:N1}s {1,7:N1} MB {2,5} files  exit {3}  {4}' -f $sw.Elapsed.TotalSeconds, $mb, $n, $LASTEXITCODE, $label)
+          }
+          "== the packed program, and the same files unpacked"
+          Scan $asar 'app.asar as installed'
+          Scan $asar 'app.asar a second time'
+          Scan (Join-Path $PWD 'lab\app') 'the same files as a plain folder'
+          "== repacked in pieces"
+          New-Item -ItemType Directory -Force lab\parts | Out-Null
+          foreach ($part in @('src', 'renderer', 'node_modules')) {
+            npx --yes @electron/asar pack "lab\app\$part" "lab\parts\$part.asar" 2>$null
+            if (Test-Path "lab\parts\$part.asar") { Scan (Join-Path $PWD "lab\parts\$part.asar") "$part only, packed" }
+          }
+          Copy-Item lab\app\main.js lab\parts\main.js
+          Scan (Join-Path $PWD 'lab\parts\main.js') 'main.js alone'
+          "== each top folder, unpacked"
+          foreach ($d in Get-ChildItem lab\app) { Scan $d.FullName $d.Name }
+          "== each library, packed on its own (slowest first is what matters)"
+          $rows = @()
+          $libs = @()
+          foreach ($d in Get-ChildItem lab\app\node_modules -Directory) { if ($d.Name.StartsWith('@')) { foreach ($e in Get-ChildItem $d.FullName -Directory) { $libs += ,@($e.FullName, "$($d.Name)/$($e.Name)") } } else { $libs += ,@($d.FullName, $d.Name) } }
+          "libraries: $($libs.Count)"
+          $i = 0
+          foreach ($l in $libs) {
+            $i++
+            $out = "lab\parts\lib$i.asar"
+            npx --yes @electron/asar pack $l[0] $out 2>$null
+            if (-not (Test-Path $out)) { continue }
+            $sw = [Diagnostics.Stopwatch]::StartNew()
+            $null = & $mp -Scan -ScanType 3 -File (Join-Path $PWD $out) -DisableRemediation 2>&1
+            $rows += [pscustomobject]@{ Seconds = [math]::Round($sw.Elapsed.TotalSeconds, 1); MB = [math]::Round((Get-Item $out).Length / 1MB, 2); Library = $l[1] }
+          }
+          $rows | Sort-Object Seconds -Descending | Select-Object -First 25 | Format-Table -AutoSize | Out-String -Width 200
+          "total for all libraries packed one by one: $([math]::Round(($rows | Measure-Object Seconds -Sum).Sum, 1))s"
 
       - name: Keep the pictures and logs
         if: always()
