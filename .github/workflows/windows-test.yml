@@ -1,0 +1,233 @@
+# Installs the published Jarvis update on a clean Windows machine, starts it, and collects what happened.
+# Run by hand from the Actions tab. It uses no keys and changes nothing in this repository.
+name: Windows test
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "How to run the installer: ui (as a person does) or silent (as an update does)"
+        default: ui
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - name: The machine
+        shell: powershell
+        run: |
+          Get-CimInstance Win32_OperatingSystem | Select-Object Caption, Version, OSArchitecture | Format-List
+          "PowerShell $($PSVersionTable.PSVersion)"
+          "Session: $([System.Diagnostics.Process]::GetCurrentProcess().SessionId), interactive: $([Environment]::UserInteractive)"
+          New-Item -ItemType Directory -Force out | Out-Null
+
+      - name: Download the published update
+        shell: powershell
+        run: |
+          $ProgressPreference = 'SilentlyContinue'
+          Invoke-WebRequest "https://github.com/${{ github.repository }}/releases/latest/download/latest.json" -OutFile out\latest.json
+          $info = Get-Content out\latest.json -Raw | ConvertFrom-Json
+          "version $($info.version), $($info.size) bytes"
+          Invoke-WebRequest $info.url -OutFile Jarvis-Setup.exe
+          "downloaded $((Get-Item Jarvis-Setup.exe).Length) bytes"
+
+      - name: Run the installer and watch it
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Continue'
+          Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+          function Shot($name) {
+            try {
+              $b = [System.Windows.Forms.SystemInformation]::VirtualScreen
+              $bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height
+              $g = [System.Drawing.Graphics]::FromImage($bmp)
+              $g.CopyFromScreen($b.Left, $b.Top, 0, 0, $bmp.Size)
+              $bmp.Save((Join-Path $PWD "out\$name.png"), [System.Drawing.Imaging.ImageFormat]::Png)
+              $g.Dispose(); $bmp.Dispose()
+            } catch { "  (screenshot failed: $($_.Exception.Message))" }
+          }
+          function Tree($rootPid) {
+            $all = Get-CimInstance Win32_Process
+            $ids = New-Object 'System.Collections.Generic.HashSet[int]'; [void]$ids.Add([int]$rootPid)
+            do { $added = $false; foreach ($q in $all) { if ($ids.Contains([int]$q.ParentProcessId) -and -not $ids.Contains([int]$q.ProcessId)) { [void]$ids.Add([int]$q.ProcessId); $added = $true } } } while ($added)
+            $all | Where-Object { $ids.Contains([int]$_.ProcessId) -or $_.Name -like 'Jarvis*' } | ForEach-Object {
+              $c = [string]$_.CommandLine; if ($c.Length -gt 200) { $c = $c.Substring(0, 200) }
+              "    $($_.Name) (pid $($_.ProcessId), parent $($_.ParentProcessId)) $c"
+            }
+          }
+          function Size($path) {
+            if (-not (Test-Path $path)) { return 'absent' }
+            $s = (Get-ChildItem $path -Recurse -File -Force -ErrorAction SilentlyContinue | Measure-Object Length -Sum).Sum
+            return ('{0:N0} MB' -f ($s / 1MB))
+          }
+          $dest = Join-Path $env:LOCALAPPDATA 'Programs\Jarvis'
+          $mode = '${{ inputs.mode }}'
+          "mode: $mode"
+          $sw = [Diagnostics.Stopwatch]::StartNew()
+          if ($mode -eq 'silent') { $p = Start-Process .\Jarvis-Setup.exe -ArgumentList '/S' -PassThru } else { $p = Start-Process .\Jarvis-Setup.exe -PassThru }
+          $null = $p.Handle
+          $n = 0
+          while (-not $p.HasExited -and $sw.Elapsed.TotalSeconds -lt 480) {
+            Start-Sleep -Seconds 4; $n++
+            $tmp = (Get-ChildItem $env:TEMP -Directory -Filter 'ns*.tmp' -ErrorAction SilentlyContinue | ForEach-Object { "$($_.Name)=$(Size $_.FullName)" }) -join ' '
+            "[$([int]$sw.Elapsed.TotalSeconds)s] installed: $(Size $dest); temp: $tmp"
+            Tree $p.Id
+            if ($n % 3 -eq 1) { Shot ('install-{0:D3}s' -f [int]$sw.Elapsed.TotalSeconds) }
+          }
+          if ($p.HasExited) { "INSTALLER FINISHED in $([int]$sw.Elapsed.TotalSeconds)s, exit code $($p.ExitCode)" }
+          else { "INSTALLER STILL RUNNING after 480s: STALLED"; Shot 'install-stalled'; Tree $p.Id; Stop-Process -Id $p.Id -Force }
+          "installed: $(Size $dest); Jarvis.exe there: $(Test-Path (Join-Path $dest 'Jarvis.exe'))"
+          Get-ChildItem $dest -ErrorAction SilentlyContinue | Select-Object Name, Length | Format-Table -AutoSize
+          "shortcuts: desktop $(Test-Path (Join-Path ([Environment]::GetFolderPath('Desktop')) 'Jarvis.lnk')), start menu $(Test-Path (Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Jarvis.lnk'))"
+
+      - name: What Windows' own virus scanner makes of his files
+        if: always()
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Continue'
+          try { Update-MpSignature -ErrorAction Stop; "signatures updated" } catch { "signatures not updated: $($_.Exception.Message)" }
+          try { Get-MpComputerStatus | Select-Object AMServiceEnabled, RealTimeProtectionEnabled, AntivirusSignatureVersion, AntivirusSignatureLastUpdated | Format-List } catch { "no scanner status: $($_.Exception.Message)" }
+          $mp = Join-Path $env:ProgramFiles 'Windows Defender\MpCmdRun.exe'
+          $dest = Join-Path $env:LOCALAPPDATA 'Programs\Jarvis'
+          $files = @((Join-Path $PWD 'Jarvis-Setup.exe'), (Join-Path $dest 'resources\app.asar'), (Join-Path $dest 'Jarvis.exe'), (Join-Path $dest 'resources\app.asar.unpacked\bin\win\adb.exe'), (Join-Path $dest 'resources\elevate.exe'))
+          foreach ($f in $files) {
+            if (-not (Test-Path $f)) { "MISSING: $f"; continue }
+            $sw = [Diagnostics.Stopwatch]::StartNew()
+            $out = & $mp -Scan -ScanType 3 -File $f -DisableRemediation 2>&1
+            "$(Split-Path $f -Leaf) ($([int]((Get-Item $f).Length / 1MB)) MB): exit code $LASTEXITCODE (0 = clean, 2 = threat) in $([int]$sw.Elapsed.TotalSeconds)s"
+            $out | ForEach-Object { "    $_" }
+          }
+          "-- what the scanner recorded on this machine"
+          try { $d = @(Get-MpThreatDetection); "detections: $($d.Count)"; $d | Select-Object InitialDetectionTime, ThreatID, Resources, ActionSuccess | Format-List; Get-MpThreat | Select-Object ThreatName, SeverityID, Resources | Format-List } catch { "not readable: $($_.Exception.Message)" }
+
+      - name: Jarvis as he opens for a person
+        if: always()
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Continue'
+          Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+          function Shot($name) {
+            try {
+              $b = [System.Windows.Forms.SystemInformation]::VirtualScreen
+              $bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height
+              $g = [System.Drawing.Graphics]::FromImage($bmp)
+              $g.CopyFromScreen($b.Left, $b.Top, 0, 0, $bmp.Size)
+              $bmp.Save((Join-Path $PWD "out\$name.png"), [System.Drawing.Imaging.ImageFormat]::Png)
+              $g.Dispose(); $bmp.Dispose()
+            } catch { "  (screenshot failed: $($_.Exception.Message))" }
+          }
+          $exe = Join-Path $env:LOCALAPPDATA 'Programs\Jarvis\Jarvis.exe'
+          if (-not (Test-Path $exe)) { "Jarvis.exe is not installed: nothing to open"; exit 0 }
+          $running = @(Get-Process Jarvis -ErrorAction SilentlyContinue)
+          "started by the installer: $($running.Count -gt 0) ($($running.Count) processes)"
+          if (-not $running.Count) { Start-Process $exe }
+          Start-Sleep -Seconds 12; Shot 'open-12s'
+          Start-Sleep -Seconds 23; Shot 'open-35s'
+          $running = @(Get-Process Jarvis -ErrorAction SilentlyContinue)
+          "after 35 seconds: $($running.Count) Jarvis processes"
+          $running | Select-Object Id, MainWindowTitle, @{ n = 'MB'; e = { [int]($_.WorkingSet64 / 1MB) } } | Format-Table -AutoSize
+          $log = Join-Path $env:APPDATA 'Jarvis\logs\jarvis.log'
+          if (Test-Path $log) { Copy-Item $log out\jarvis-first-run.log; "---- his log ----"; Get-Content $log | ForEach-Object { if ($_.Length -gt 400) { $_.Substring(0, 400) } else { $_ } } } else { "NO LOG at $log"; Get-ChildItem (Join-Path $env:APPDATA 'Jarvis') -Recurse -ErrorAction SilentlyContinue | Select-Object -First 40 FullName }
+          Get-Process Jarvis -ErrorAction SilentlyContinue | Stop-Process -Force
+          Start-Sleep -Seconds 3
+
+      - name: His window, photographed (test mode)
+        if: always()
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Continue'
+          Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+          function Shot($name) {
+            try {
+              $b = [System.Windows.Forms.SystemInformation]::VirtualScreen
+              $bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height
+              $g = [System.Drawing.Graphics]::FromImage($bmp)
+              $g.CopyFromScreen($b.Left, $b.Top, 0, 0, $bmp.Size)
+              $bmp.Save((Join-Path $PWD "out\$name.png"), [System.Drawing.Imaging.ImageFormat]::Png)
+              $g.Dispose(); $bmp.Dispose()
+            } catch { "  (screenshot failed: $($_.Exception.Message))" }
+          }
+          $exe = Join-Path $env:LOCALAPPDATA 'Programs\Jarvis\Jarvis.exe'
+          if (-not (Test-Path $exe)) { "not installed"; exit 0 }
+          New-Item -ItemType Directory -Force ud | Out-Null
+          Set-Content ud\config.json '{"look":"nebula"}'
+          foreach ($view in @('main', 'projects', 'invoice')) {
+            $env:JARVIS_TEST = '1'; $env:JARVIS_NO_SETUP = '1'; $env:JARVIS_TEST_VISIBLE = '1'
+            $env:JARVIS_USERDATA = (Join-Path $PWD 'ud'); $env:JARVIS_SCREENSHOT = (Join-Path $PWD "out\window-$view.png"); $env:JARVIS_SHOT_DELAY = '9000'
+            $env:JARVIS_TEST_PROJECTS = ''; $env:JARVIS_TEST_INVOICE = ''
+            if ($view -eq 'projects') { $env:JARVIS_TEST_PROJECTS = '1' }
+            if ($view -eq 'invoice') { $env:JARVIS_TEST_INVOICE = '1' }
+            $p = Start-Process $exe -PassThru
+            Start-Sleep -Seconds 7; Shot "desktop-$view"
+            $done = $p.WaitForExit(40000)
+            "${view}: finished by itself: $done; picture saved: $(Test-Path "out\window-$view.png")"
+            Get-Process Jarvis -ErrorAction SilentlyContinue | Stop-Process -Force
+            Start-Sleep -Seconds 2
+          }
+          Remove-Item Env:JARVIS_TEST, Env:JARVIS_NO_SETUP, Env:JARVIS_TEST_VISIBLE, Env:JARVIS_USERDATA, Env:JARVIS_SCREENSHOT, Env:JARVIS_SHOT_DELAY, Env:JARVIS_TEST_PROJECTS, Env:JARVIS_TEST_INVOICE -ErrorAction SilentlyContinue
+
+      - name: The Windows parts he relies on
+        if: always()
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Continue'
+          "== Start menu apps"
+          try { $apps = @(Get-StartApps); "Get-StartApps: $($apps.Count) apps"; $apps | Select-Object -First 8 Name | Format-Table -HideTableHeaders } catch { "Get-StartApps FAILED: $($_.Exception.Message)" }
+          "== open an app by its Start menu name (the command Jarvis runs)"
+          $env:JARVIS_APP = 'Notepad'
+          $script = '$n = $env:JARVIS_APP; $all = @(Get-StartApps); $a = $all | Where-Object { $_.Name -eq $n } | Select-Object -First 1; ' + 'if (-not $a) { $a = $all | Where-Object { $_.Name -like (''*'' + $n + ''*'') } | Sort-Object { $_.Name.Length } | Select-Object -First 1 }; ' + 'if ($a) { Start-Process (''shell:AppsFolder\'' + $a.AppID); Write-Output $a.Name } else { exit 3 }'
+          $out = & powershell.exe -NoProfile -NonInteractive -Command $script
+          "answered: '$out', exit code $LASTEXITCODE"
+          Start-Sleep -Seconds 4
+          "notepad running: $(@(Get-Process notepad -ErrorAction SilentlyContinue).Count -gt 0)"
+          "== copy a file the way File Explorer does"
+          Set-Content out\copy-me.txt 'x'
+          $env:JARVIS_FILE = (Join-Path $PWD 'out\copy-me.txt')
+          & powershell.exe -NoProfile -NonInteractive -Command 'Set-Clipboard -LiteralPath $env:JARVIS_FILE'
+          "exit code $LASTEXITCODE"
+          try { Add-Type -AssemblyName System.Windows.Forms; "files on the clipboard: $(@([System.Windows.Forms.Clipboard]::GetFileDropList()) -join ', ')" } catch { "couldn't read the clipboard: $($_.Exception.Message)" }
+          "== backup voice"
+          $env:JARVIS_WAV = (Join-Path $PWD 'out\voice.wav'); $env:JARVIS_TEXT = 'Good afternoon. All systems are working.'
+          & powershell.exe -NoProfile -NonInteractive -Command 'Add-Type -AssemblyName System.Speech; $s = New-Object System.Speech.Synthesis.SpeechSynthesizer; try { $s.SelectVoiceByHints([System.Speech.Synthesis.VoiceGender]::Male) } catch {}; $f = New-Object System.Speech.AudioFormat.SpeechAudioFormatInfo(24000, [System.Speech.AudioFormat.AudioBitsPerSample]::Sixteen, [System.Speech.AudioFormat.AudioChannel]::Mono); $s.SetOutputToWaveFile($env:JARVIS_WAV, $f); $s.Speak($env:JARVIS_TEXT); $s.Dispose()'
+          "exit code $LASTEXITCODE; sound file: $(if (Test-Path out\voice.wav) { (Get-Item out\voice.wav).Length } else { 'none' }) bytes"
+
+      - name: Mouse and keyboard helper
+        if: always()
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $asar = Join-Path $env:LOCALAPPDATA 'Programs\Jarvis\resources\app.asar'
+          if (-not (Test-Path $asar)) { "not installed"; exit 0 }
+          npx --yes @electron/asar extract-file $asar src/input.js
+          if (-not (Test-Path input.js)) { "couldn't take input.js out of the app"; exit 0 }
+          @'
+          const fs = require("fs"), { spawn } = require("child_process");
+          const m = /const WIN_HELPER = String\.raw`([\s\S]*?)`;/.exec(fs.readFileSync("input.js", "utf8"));
+          if (!m) { console.log("HELPER NOT FOUND in input.js"); process.exit(0); }
+          const enc = Buffer.from(m[1], "utf16le").toString("base64");
+          const p = spawn("powershell.exe", ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", enc], { stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
+          let buf = ""; const replies = [];
+          p.stdout.on("data", (d) => { buf += d; let i; while ((i = buf.indexOf("\n")) >= 0) { replies.push(buf.slice(0, i).trim()); buf = buf.slice(i + 1); } });
+          p.stderr.on("data", (d) => console.log("stderr:", String(d).trim().slice(0, 600)));
+          p.on("exit", (c) => console.log("helper exited with", c));
+          const cmds = [{ op: "trusted" }, { op: "move", x: 300, y: 300 }, { op: "click", x: 400, y: 300, button: "left" }, { op: "type", text: "Hello from Jarvis" }, { op: "key", keys: ["ctrl", "a"] }, { op: "key", keys: ["return"] }, { op: "scroll", x: 400, y: 300, dy: 2 }, { op: "bogus" }];
+          (async () => {
+            for (const c of cmds) {
+              const before = replies.length, start = Date.now();
+              p.stdin.write(JSON.stringify(c) + "\n");
+              while (replies.length === before && Date.now() - start < 60000) await new Promise((r) => setTimeout(r, 50));
+              console.log(JSON.stringify(c), "->", replies.length > before ? replies[replies.length - 1] : "NO REPLY", "(" + (Date.now() - start) + " ms)");
+            }
+            p.stdin.end(); setTimeout(() => process.exit(0), 1500);
+          })();
+          '@ | Set-Content helper-test.js -Encoding UTF8
+          node helper-test.js
+
+      - name: Keep the pictures and logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-test
+          path: out
+          if-no-files-found: warn
