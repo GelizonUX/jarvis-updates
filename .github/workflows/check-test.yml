@@ -196,6 +196,10 @@ jobs:
             Copy-Item $log out\jarvis-log-end.txt -ErrorAction SilentlyContinue
           } else { "no notes file" }
           "Windows lists the running programs in $([math]::Round((Measure-Command { tasklist /fo csv /nh | Out-Null }).TotalSeconds, 1)) s with Jarvis $(if (Get-Process Jarvis -ErrorAction SilentlyContinue) { 'running' } else { 'closed' }) (tasklist), and in $([math]::Round((Measure-Command { powershell -NoProfile -NonInteractive -Command 'Get-Process | Select-Object Id,ProcessName,Path | ConvertTo-Json -Compress' | Out-Null }).TotalSeconds, 1)) s by PowerShell"
+          $mods = @(Get-Process Jarvis -ErrorAction SilentlyContinue | ForEach-Object { $_.Modules } | Where-Object { $_.ModuleName -match '^(vcruntime140|msvcp140|onnxruntime)' } | ForEach-Object { $_.FileName } | Sort-Object -Unique)
+          "Microsoft's runtime files and the wake-word engine, as loaded inside Jarvis:"
+          $mods | ForEach-Object { "   $($_.Replace("$env:LOCALAPPDATA\Programs\jarvis\", '<his folder>\'))" }
+          "runtime files loaded from his own folder: $(@($mods | Where-Object { $_ -like "$env:LOCALAPPDATA\Programs\jarvis\*" -and $_ -match 'vcruntime140|msvcp140' }).Count) of 5; from Windows' own folder: $(@($mods | Where-Object { $_ -like "$env:WINDIR\*" -and $_ -match 'vcruntime140|msvcp140' }).Count)"
           "files for ARM processors in his folder: $(@(Get-ChildItem "$env:LOCALAPPDATA\Programs\jarvis\resources" -Recurse -Directory -Filter arm64 -ErrorAction SilentlyContinue).Count) (should be 0)"
           "size of his program folder: $([math]::Round(((Get-ChildItem "$env:LOCALAPPDATA\Programs\jarvis" -Recurse -File | Measure-Object Length -Sum).Sum / 1MB))) MB"
       - name: Removing him
