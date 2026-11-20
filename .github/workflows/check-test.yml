@@ -1,0 +1,47 @@
+name: Check file test
+on:
+  workflow_dispatch:
+    inputs:
+      script:
+        description: The check file, base64
+        required: true
+jobs:
+  test:
+    runs-on: windows-2025
+    timeout-minutes: 20
+    steps:
+      - name: Install the published Jarvis
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ProgressPreference = 'SilentlyContinue'
+          $info = Invoke-RestMethod 'https://github.com/GelizonUX/jarvis-updates/releases/latest/download/latest.json'
+          "installing $($info.version)"
+          Invoke-WebRequest $info.url -OutFile "$env:RUNNER_TEMP\setup.exe"
+          $p = Start-Process "$env:RUNNER_TEMP\setup.exe" -ArgumentList '/S' -PassThru
+          if (-not $p.WaitForExit(300000)) { throw 'the installer did not finish in 5 minutes' }
+          "installer exit code $($p.ExitCode)"
+          "installed: $(Test-Path "$env:LOCALAPPDATA\Programs\jarvis\Jarvis.exe")"
+      - name: Run the check file the way a person would
+        shell: powershell
+        env:
+          JARVIS_CHECK_NOPAUSE: '1'
+        run: |
+          New-Item -ItemType Directory -Force 'C:\check folder' | Out-Null
+          [IO.File]::WriteAllBytes('C:\check folder\Jarvis Check.cmd', [Convert]::FromBase64String('${{ inputs.script }}'))
+          & 'C:\check folder\Jarvis Check.cmd'
+          "exit code $LASTEXITCODE"
+      - name: Show the report
+        if: always()
+        shell: powershell
+        run: |
+          $zip = Get-ChildItem ([Environment]::GetFolderPath('Desktop')) -Filter 'Jarvis-report-*' | Select-Object -First 1
+          "report: $($zip.FullName) $($zip.Length) bytes"
+          if ($zip.PSIsContainer) { Copy-Item $zip.FullName out -Recurse } else { Expand-Archive $zip.FullName -DestinationPath out }
+          Get-ChildItem out | Format-Table Name, Length
+          Get-Content out\report.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: check-report
+          path: out
