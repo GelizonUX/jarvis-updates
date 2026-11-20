@@ -20,6 +20,9 @@ on:
       nodocs:
         description: Point the Documents folder at a place that does not exist, as after OneDrive is removed (on/off)
         default: 'off'
+      again:
+        description: Open the Setup file a second time afterwards (on/off)
+        default: 'off'
 jobs:
   test:
     runs-on: windows-2025
@@ -104,6 +107,28 @@ jobs:
           if ($zip.PSIsContainer) { Copy-Item $zip.FullName out -Recurse } else { Expand-Archive $zip.FullName -DestinationPath out }
           Get-ChildItem out | Format-Table Name, Length
           Get-Content out\report.txt
+      - name: Opening the Setup file again
+        if: inputs.again == 'on'
+        shell: powershell
+        run: |
+          Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+          function Shot($n) { $b = [System.Windows.Forms.SystemInformation]::VirtualScreen; $bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height; $g = [System.Drawing.Graphics]::FromImage($bmp); $g.CopyFromScreen($b.Left, $b.Top, 0, 0, $bmp.Size); $bmp.Save("$pwd\out\$n.png"); $g.Dispose(); $bmp.Dispose() }
+          New-Item -ItemType Directory -Force out | Out-Null
+          Get-Process Jarvis -ErrorAction SilentlyContinue | Stop-Process -Force
+          Start-Sleep 3
+          $made = (Get-Item "$env:LOCALAPPDATA\Programs\jarvis\resources").CreationTime
+          $p = Start-Process "$env:RUNNER_TEMP\setup.exe" -PassThru
+          Start-Sleep 8
+          Shot 'setup-again-1-question'
+          "the Setup file is waiting for an answer: $(-not $p.HasExited)"
+          $ws = New-Object -ComObject WScript.Shell
+          $null = $ws.AppActivate($p.Id)
+          Start-Sleep 1
+          $ws.SendKeys('y')
+          Start-Sleep 14
+          Shot 'setup-again-2-after-yes'
+          "the Setup file closed: $($p.HasExited); Jarvis running: $(@(Get-Process Jarvis -ErrorAction SilentlyContinue).Count) processes"
+          "his program folder was left alone: $((Get-Item "$env:LOCALAPPDATA\Programs\jarvis\resources").CreationTime -eq $made)"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
