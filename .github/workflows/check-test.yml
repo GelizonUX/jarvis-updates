@@ -17,6 +17,9 @@ on:
       loose:
         description: Run an unzipped copy from folders with spaces in their names (on/off)
         default: 'off'
+      nodocs:
+        description: Point the Documents folder at a place that does not exist, as after OneDrive is removed (on/off)
+        default: 'off'
 jobs:
   test:
     runs-on: windows-2025
@@ -75,6 +78,14 @@ jobs:
           "TEMP=$tmp" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
           "TMP=$tmp" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
           "copy made: $(Test-Path "$dest\Jarvis.exe")"
+      - name: A Documents folder that does not exist
+        if: inputs.nodocs == 'on'
+        shell: powershell
+        run: |
+          $k = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders'
+          Set-ItemProperty $k -Name Personal -Value 'C:\Users\runneradmin\OneDrive\Documents'
+          Set-ItemProperty $k -Name '{F42EE2D3-909F-4907-8871-4C22FC0BF756}' -Value 'C:\Users\runneradmin\OneDrive\Documents'
+          "Documents as Windows now reports it: [$([Environment]::GetFolderPath('MyDocuments'))]"
       - name: Run the check file the way a person would
         shell: powershell
         env:
