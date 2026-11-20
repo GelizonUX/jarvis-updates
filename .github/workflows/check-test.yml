@@ -23,10 +23,13 @@ on:
       again:
         description: Open the Setup file a second time afterwards (on/off)
         default: 'off'
+      runtime:
+        description: Collect Microsoft's Visual C++ runtime files from this machine's Visual Studio (on/off)
+        default: 'off'
 jobs:
   test:
     runs-on: windows-2025
-    timeout-minutes: 25
+    timeout-minutes: 35
     steps:
       - name: Give the machine a microphone and speakers
         if: inputs.mic == 'on'
@@ -147,6 +150,80 @@ jobs:
           $mains = @(Get-CimInstance Win32_Process -Filter "Name='Jarvis.exe'" | Where-Object { $_.CommandLine -notmatch '--type=' })
           "main Jarvis programs after four quick clicks: $($mains.Count) (should be 1)"
           Get-Content "$env:APPDATA\Jarvis\logs\jarvis.log" -Tail 8 | ForEach-Object { if ($_.Length -gt 200) { $_.Substring(0, 200) } else { $_ } }
+      - name: An update, the way he runs it himself
+        if: inputs.again == 'on'
+        shell: powershell
+        run: |
+          Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+          function Shot($n) { $b = [System.Windows.Forms.SystemInformation]::VirtualScreen; $bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height; $g = [System.Drawing.Graphics]::FromImage($bmp); $g.CopyFromScreen($b.Left, $b.Top, 0, 0, $bmp.Size); $bmp.Save("$pwd\out\$n.png"); $g.Dispose(); $bmp.Dispose() }
+          New-Item -ItemType Directory -Force out | Out-Null
+          $exe = "$env:LOCALAPPDATA\Programs\jarvis\Jarvis.exe"
+          $key = Get-ChildItem 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall' | Where-Object { (Get-ItemProperty $_.PSPath).DisplayName -match '^Jarvis' } | Select-Object -First 1
+          $real = (Get-ItemProperty $key.PSPath).DisplayVersion
+          Set-ItemProperty -Path $key.PSPath -Name DisplayVersion -Value '1.0.0'
+          "installed version $real, shown to the installer as 1.0.0 (an older Jarvis)"
+          if (-not (Get-Process Jarvis -ErrorAction SilentlyContinue)) { Start-Process $exe; Start-Sleep 15 }
+          $old = (Get-Process Jarvis | Sort-Object StartTime | Select-Object -First 1).StartTime
+          $made = (Get-Item "$env:LOCALAPPDATA\Programs\jarvis\resources").CreationTime
+          $p = Start-Process "$env:RUNNER_TEMP\setup.exe" -ArgumentList '--updated', '--force-run' -PassThru
+          Start-Sleep 4
+          Shot 'update-1-in-progress'
+          $wins = @(Get-Process | Where-Object { $_.MainWindowTitle -match 'Jarvis' } | ForEach-Object { "$($_.ProcessName): $($_.MainWindowTitle)" })
+          "at 4 seconds the installer is running: $(-not $p.HasExited); windows on screen: $($wins -join ' | ')"
+          $null = $p.WaitForExit(240000)
+          "the installer finished: $($p.HasExited), exit code $($p.ExitCode)"
+          Start-Sleep 25
+          Shot 'update-2-after'
+          $j = @(Get-Process Jarvis -ErrorAction SilentlyContinue)
+          "Jarvis after the update: $($j.Count) processes; he was reopened as a new copy: $(($j.Count -gt 0) -and (($j | Sort-Object StartTime | Select-Object -First 1).StartTime -gt $old))"
+          "his program folder was replaced: $((Get-Item "$env:LOCALAPPDATA\Programs\jarvis\resources").CreationTime -ne $made); version now $((Get-ItemProperty $key.PSPath).DisplayVersion)"
+          "his window: $(@(Get-Process Jarvis -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowTitle } | ForEach-Object { $_.MainWindowTitle }) -join ', ')"
+          "his start-up entries: $(((Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run').PSObject.Properties | Where-Object { $_.Value -match 'Jarvis' } | ForEach-Object { $_.Name }) -join ', ') (an update keeps it)"
+      - name: What his notes say
+        if: always()
+        shell: powershell
+        run: |
+          $log = "$env:APPDATA\Jarvis\logs\jarvis.log"
+          if (Test-Path $log) {
+            Select-String -Path $log -Pattern 'selfcheck|wake:|Hey Jarvis|microphone:|Microphone|update:|watcher failed|START-UP|page error|window:' | ForEach-Object { $l = $_.Line; if ($l.Length -gt 230) { $l.Substring(0, 230) } else { $l } } | Select-Object -Last 40
+            Copy-Item $log out\jarvis-log-end.txt -ErrorAction SilentlyContinue
+          } else { "no notes file" }
+          "files for ARM processors in his folder: $(@(Get-ChildItem "$env:LOCALAPPDATA\Programs\jarvis\resources" -Recurse -Directory -Filter arm64 -ErrorAction SilentlyContinue).Count) (should be 0)"
+          "size of his program folder: $([math]::Round(((Get-ChildItem "$env:LOCALAPPDATA\Programs\jarvis" -Recurse -File | Measure-Object Length -Sum).Sum / 1MB))) MB"
+      - name: Removing him
+        if: inputs.again == 'on'
+        shell: powershell
+        run: |
+          $run = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+          Get-Process Jarvis -ErrorAction SilentlyContinue | Stop-Process -Force
+          Start-Sleep 3
+          "his start-up entries before: $(((Get-ItemProperty $run).PSObject.Properties | Where-Object { $_.Value -match 'Jarvis' } | ForEach-Object { $_.Name }) -join ', ')"
+          Start-Process "$env:LOCALAPPDATA\Programs\jarvis\Uninstall Jarvis.exe" -ArgumentList '/S' -Wait
+          Start-Sleep 30
+          "his program is gone: $(-not (Test-Path "$env:LOCALAPPDATA\Programs\jarvis\Jarvis.exe"))"
+          "his start-up entries after: '$(((Get-ItemProperty $run).PSObject.Properties | Where-Object { $_.Value -match 'Jarvis' } | ForEach-Object { $_.Name }) -join ', ')' (should be empty)"
+          "his memories and settings were kept: $(Test-Path "$env:APPDATA\Jarvis\config.json")"
+          "Jarvis processes left: $(@(Get-Process Jarvis -ErrorAction SilentlyContinue).Count)"
+      - name: Microsoft's runtime files
+        if: inputs.runtime == 'on'
+        shell: powershell
+        run: |
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -property installationPath
+          $crt = Get-ChildItem "$vs\VC\Redist\MSVC\*\x64\Microsoft.VC*.CRT" -Directory -ErrorAction SilentlyContinue | Sort-Object FullName | Select-Object -Last 1
+          "taken from: $($crt.FullName)"
+          New-Item -ItemType Directory -Force runtime | Out-Null
+          foreach ($n in 'vcruntime140.dll', 'vcruntime140_1.dll', 'msvcp140.dll', 'msvcp140_1.dll', 'msvcp140_atomic_wait.dll') {
+            $f = Join-Path $crt.FullName $n
+            $sig = Get-AuthenticodeSignature $f
+            "{0} | {1} bytes | version {2} | signature {3}, {4} | sha256 {5}" -f $n, (Get-Item $f).Length, (Get-Item $f).VersionInfo.FileVersion, $sig.Status, ($sig.SignerCertificate.Subject -split ',')[0], (Get-FileHash $f -Algorithm SHA256).Hash
+            Copy-Item $f runtime\
+          }
+      - uses: actions/upload-artifact@v4
+        if: inputs.runtime == 'on'
+        with:
+          name: win-x64-runtime
+          path: runtime
+          retention-days: 1
       - uses: actions/upload-artifact@v4
         if: always()
         with:
